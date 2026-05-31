@@ -1,6 +1,9 @@
 #include "db.h"
+#include "blacklist.h"
 
 #include <assert.h>
+#include <fstream>
+#include <stdio.h>
 #include <set>
 #include <vector>
 
@@ -40,6 +43,24 @@ int main()
     assert(reported.count(live) == 1);
     assert(reported.count(previouslySuccessful) == 1);
     assert(reported.count(neverTried) == 0);
+
+    const char* path = "db_blacklist_tests.tmp";
+    {
+        std::ofstream file(path);
+        file << live.ToStringIP() << "\n";
+    }
+    gBlacklist.SetFileName(path);
+    std::string error;
+    assert(gBlacklist.ReloadFile(&error));
+
+    bool nets[NET_MAX] = {};
+    nets[NET_IPV4] = true;
+    nets[NET_IPV6] = true;
+    std::set<CNetAddr> ips;
+    db.GetIPs(ips, NODE_NETWORK, 100, nets);
+    assert(ips.empty());
+    assert(db.GetGoodIPs().size() == 1);
+    remove(path);
 
     return 0;
 }

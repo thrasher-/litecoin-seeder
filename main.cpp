@@ -405,6 +405,21 @@ public:
   }
 };
 
+static bool IsAddrBlacklisted(const addr_t& raw)
+{
+  if (raw.v == 4) {
+    struct in_addr addr;
+    memcpy(&addr, raw.data.v4, 4);
+    return gBlacklist.IsBlacklisted(CNetAddr(addr));
+  }
+  if (raw.v == 6) {
+    struct in6_addr addr;
+    memcpy(&addr, raw.data.v6, 16);
+    return gBlacklist.IsBlacklisted(CNetAddr(addr));
+  }
+  return false;
+}
+
 extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int max, int ipv4, int ipv6) {
   CDnsThread *thread = (CDnsThread*)data;
 
@@ -430,15 +445,44 @@ extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int 
     max = maxmax;
   int i=0;
   while (i<max) {
+    if (i >= size)
+      break;
     int j = i + (rand() % (size - i));
+    bool found = false;
+    unsigned int scanned = 0;
     do {
         bool ok = (ipv4 && thisflag.cache[j].v == 4) ||
                   (ipv6 && thisflag.cache[j].v == 6);
-        if (ok) break;
+        if (ok && IsAddrBlacklisted(thisflag.cache[j])) {
+            if (thisflag.cache[j].v == 4)
+              thisflag.nIPv4--;
+            else if (thisflag.cache[j].v == 6)
+              thisflag.nIPv6--;
+            thisflag.cache[j] = thisflag.cache[size - 1];
+            thisflag.cache.pop_back();
+            size--;
+            maxmax = (ipv4 ? thisflag.nIPv4 : 0) + (ipv6 ? thisflag.nIPv6 : 0);
+            if (max > size)
+              max = size;
+            if (max > maxmax)
+              max = maxmax;
+            if (i >= size)
+              break;
+            if (j >= size)
+              j = i;
+            continue;
+        }
+        if (ok) {
+            found = true;
+            break;
+        }
         j++;
         if (j==size)
             j=i;
-    } while(1);
+        scanned++;
+    } while(scanned < size - i);
+    if (!found)
+      break;
     addr[i] = thisflag.cache[j];
     thisflag.cache[j] = thisflag.cache[i];
     thisflag.cache[i] = addr[i];
