@@ -66,7 +66,7 @@ public:
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
                               "--blacklist <file>        Suppress IPs/CIDRs listed in file\n"
-                              "--blacklist-log <file>    Append DNSBL-listed/unlisted peer changes to file\n"
+                              "--blacklist-log <file>    Append DNSBL refresh progress and peer changes to file\n"
                               "--dnsbl <zone>            Suppress IPv4 nodes listed in DNSBL zone (repeatable)\n"
                               "--dnsbl-resolver <ip:port> DNS resolver for DNSBL checks (default: system resolver)\n"
                               "--blacklist-refresh <n>   Seconds between blacklist reloads/DNSBL refreshes (default 3600)\n"
@@ -608,7 +608,7 @@ int main(int argc, char **argv) {
     }
     fclose(file);
     gBlacklist.SetLogFileName(opts.blacklist_log);
-    printf("Logging blacklist changes to %s\n", opts.blacklist_log);
+    printf("Logging blacklist refresh progress and changes to %s\n", opts.blacklist_log);
   }
   for (vector<string>::const_iterator it = opts.dnsbl_zones.begin(); it != opts.dnsbl_zones.end(); it++) {
     gBlacklist.AddDnsblZone(*it);

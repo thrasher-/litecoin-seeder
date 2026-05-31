@@ -109,6 +109,38 @@ struct DnsblLogChange
     string reason;
 };
 
+static string FormatUtcTimestamp(int64_t timestamp)
+{
+    time_t when = (time_t)timestamp;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    gmtime_r(&when, &tm);
+
+    char timebuf[32];
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return timebuf;
+}
+
+static bool AppendLogLine(const string& path, const string& line)
+{
+    if (path.empty())
+        return true;
+
+    ofstream file(path.c_str(), ios::out | ios::app);
+    if (!file.is_open())
+        return false;
+
+    file << line << "\n";
+    return true;
+}
+
+static bool AppendStatusLogLine(const string& path, const string& action, const string& detail)
+{
+    if (path.empty())
+        return true;
+    return AppendLogLine(path, CBlacklist::FormatStatusLogEntry(time(NULL), action, detail));
+}
+
 static bool AppendLogChanges(const string& path, const vector<DnsblLogChange>& changes)
 {
     if (path.empty() || changes.empty())
@@ -200,17 +232,17 @@ bool CBlacklist::ParseEntry(const string& line, CBlacklistEntry& entry)
 
 string CBlacklist::FormatLogEntry(int64_t timestamp, const string& action, const CNetAddr& addr, const string& reason)
 {
-    time_t when = (time_t)timestamp;
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-    gmtime_r(&when, &tm);
-
-    char timebuf[32];
-    strftime(timebuf, sizeof(timebuf), "%Y-%m-%dT%H:%M:%SZ", &tm);
-
-    string line = string(timebuf) + " " + action + " " + addr.ToStringIP();
+    string line = FormatUtcTimestamp(timestamp) + " " + action + " " + addr.ToStringIP();
     if (!reason.empty())
         line += " " + reason;
+    return line;
+}
+
+string CBlacklist::FormatStatusLogEntry(int64_t timestamp, const string& action, const string& detail)
+{
+    string line = FormatUtcTimestamp(timestamp) + " " + action;
+    if (!detail.empty())
+        line += " " + detail;
     return line;
 }
 
@@ -571,25 +603,78 @@ int CBlacklist::RefreshDnsbl(const vector<CNetAddr>& addrs)
         return 0;
 
     set<CNetAddr> unique(addrs.begin(), addrs.end());
+    vector<CNetAddr> ipv4Addrs;
+    ipv4Addrs.reserve(unique.size());
+    for (set<CNetAddr>::const_iterator it = unique.begin(); it != unique.end(); it++) {
+        if (it->IsIPv4())
+            ipv4Addrs.push_back(*it);
+    }
+    if (!AppendStatusLogLine(logPath, "refresh-start",
+                             strprintf("peers=%u ipv4=%u zones=%u file_entries=%u",
+                                       (unsigned int)unique.size(),
+                                       (unsigned int)ipv4Addrs.size(),
+                                       (unsigned int)zones.size(),
+                                       (unsigned int)GetFileEntryCount()))) {
+        fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+    }
+
     map<CNetAddr, DnsblResult> updates;
     int checked = 0;
-    for (set<CNetAddr>::const_iterator it = unique.begin(); it != unique.end(); it++) {
-        if (!it->IsIPv4())
-            continue;
+    int errors = 0;
+    int listedNow = 0;
+    int processed = 0;
+    for (vector<CNetAddr>::const_iterator it = ipv4Addrs.begin(); it != ipv4Addrs.end(); it++) {
+        processed++;
         bool listed = false;
         string reason;
-        if (!CheckDnsbl(*it, zones, listed, reason))
+        if (!CheckDnsbl(*it, zones, listed, reason)) {
+            errors++;
+            if (processed % 50 == 0 &&
+                !AppendStatusLogLine(logPath, "refresh-progress",
+                                     strprintf("processed=%i/%u checked=%i errors=%i listed=%i",
+                                               processed,
+                                               (unsigned int)ipv4Addrs.size(),
+                                               checked,
+                                               errors,
+                                               listedNow))) {
+                fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+            }
             continue;
+        }
         DnsblResult result;
         result.listed = listed;
         result.reason = reason;
         result.checkedAt = time(NULL);
         updates[*it] = result;
         checked++;
+        if (listed)
+            listedNow++;
+        if (processed % 50 == 0 &&
+            !AppendStatusLogLine(logPath, "refresh-progress",
+                                 strprintf("processed=%i/%u checked=%i errors=%i listed=%i",
+                                           processed,
+                                           (unsigned int)ipv4Addrs.size(),
+                                           checked,
+                                           errors,
+                                           listedNow))) {
+            fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+        }
     }
 
-    if (updates.empty())
+    if (updates.empty()) {
+        if (!AppendStatusLogLine(logPath, "refresh-finish",
+                                 strprintf("processed=%i/%u checked=%i errors=%i listed=%i file_entries=%u dnsbl_listed=%u",
+                                           processed,
+                                           (unsigned int)ipv4Addrs.size(),
+                                           checked,
+                                           errors,
+                                           listedNow,
+                                           (unsigned int)GetFileEntryCount(),
+                                           (unsigned int)GetDnsblListedCount()))) {
+            fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+        }
         return checked;
+    }
 
     vector<DnsblLogChange> logChanges;
     CRITICAL_BLOCK(cs)
@@ -636,6 +721,17 @@ int CBlacklist::RefreshDnsbl(const vector<CNetAddr>& addrs)
     }
     if (!AppendLogChanges(logPath, logChanges))
         fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+    if (!AppendStatusLogLine(logPath, "refresh-finish",
+                             strprintf("processed=%i/%u checked=%i errors=%i listed=%i file_entries=%u dnsbl_listed=%u",
+                                       processed,
+                                       (unsigned int)ipv4Addrs.size(),
+                                       checked,
+                                       errors,
+                                       listedNow,
+                                       (unsigned int)GetFileEntryCount(),
+                                       (unsigned int)GetDnsblListedCount()))) {
+        fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
+    }
     return checked;
 }
 

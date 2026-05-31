@@ -54,6 +54,7 @@ public:
 
     static bool ParseEntry(const std::string& line, CBlacklistEntry& entry);
     static std::string FormatLogEntry(int64_t timestamp, const std::string& action, const CNetAddr& addr, const std::string& reason);
+    static std::string FormatStatusLogEntry(int64_t timestamp, const std::string& action, const std::string& detail);
 
     void SetFileName(const std::string& fileNameIn);
     void SetLogFileName(const std::string& logFileNameIn);
