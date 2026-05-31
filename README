@@ -48,6 +48,74 @@ $ make
 
 This will produce the `dnsseed` binary.
 
+BLACKLISTING
+------------
+
+`dnsseed` can suppress nodes from DNS responses using a local blacklist file,
+DNSBL lookups, or both. Blacklist checks are applied when peers are added and
+when DNS answer caches are built. DNSBL checks run in a background thread; they
+are not performed while answering DNS requests.
+
+For a static blacklist, create a file containing one IP address or CIDR range
+per line. `#` starts a comment.
+
+Example `blacklist.txt`:
+
+```
+# Exact IPs
+203.0.113.10
+
+# IPv4 and IPv6 ranges
+198.51.100.0/24
+2001:4860:4860::/48
+```
+
+Run with:
+
+```
+./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
+  --blacklist blacklist.txt
+```
+
+For DNSBL-based suppression, pass one or more DNSBL zones:
+
+```
+./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
+  --dnsbl zen.spamhaus.org \
+  --dnsbl b.barracudacentral.org \
+  --dnsbl all.spamrats.com
+```
+
+DNSBLs are checked against IPv4 nodes by reversing the octets and querying the
+zone. For example `203.0.113.10` is checked as:
+
+```
+10.113.0.203.zen.spamhaus.org
+```
+
+A response in `127.0.0.0/8` is treated as listed. For Spamhaus, responses in
+`127.255.255.0/24` are treated as query/configuration errors, not listings.
+This matters because Spamhaus may return `127.255.255.254` when DNSBL queries
+arrive through a public or open resolver.
+
+Use a local recursive resolver or Spamhaus DQS for production. Avoid relying on
+large public resolvers such as `1.1.1.1` or `8.8.8.8` for DNSBL checks; they
+can produce blocked, rewritten, or false-negative responses. To force a
+specific resolver:
+
+```
+./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
+  --dnsbl zen.spamhaus.org \
+  --dnsbl-resolver 127.0.0.1:53
+```
+
+The blacklist file is reloaded and DNSBL entries are refreshed every 3600
+seconds by default. Adjust the interval with:
+
+```
+--blacklist-refresh 1800
+```
+
 TESTING
 -------
 

@@ -10,6 +10,7 @@
 #include <atomic>
 
 #include "bitcoin.h"
+#include "blacklist.h"
 #include "db.h"
 
 using namespace std;
@@ -34,10 +35,14 @@ public:
   const char *ipv4_proxy;
   const char *ipv6_proxy;
   const char *magic;
+  const char *blacklist_file;
+  const char *dnsbl_resolver;
+  int nBlacklistRefresh;
   std::vector<string> vSeeds;
+  std::vector<string> dnsbl_zones;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), blacklist_file(NULL), dnsbl_resolver(NULL), nBlacklistRefresh(3600) {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "Litecoin-seeder\n"
@@ -59,12 +64,22 @@ public:
                               "--p2port <port> P2P port to connect to\n"
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
+                              "--blacklist <file>        Suppress IPs/CIDRs listed in file\n"
+                              "--dnsbl <zone>            Suppress IPv4 nodes listed in DNSBL zone (repeatable)\n"
+                              "--dnsbl-resolver <ip:port> DNS resolver for DNSBL checks (default: system resolver)\n"
+                              "--blacklist-refresh <n>   Seconds between blacklist reloads/DNSBL refreshes (default 3600)\n"
                               "--testnet       Use testnet\n"
                               "--wipeban       Wipe list of banned nodes\n"
                               "--wipeignore    Wipe list of ignored nodes\n"
                               "-?, --help      Show this text\n"
                               "\n";
     bool showHelp = false;
+    enum {
+      OPT_BLACKLIST = 1000,
+      OPT_DNSBL,
+      OPT_DNSBL_RESOLVER,
+      OPT_BLACKLIST_REFRESH
+    };
 
     while(1) {
       static struct option long_options[] = {
@@ -83,6 +98,10 @@ public:
         {"p2port", required_argument, 0, 'b'},
         {"magic", required_argument, 0, 'q'},
         {"minheight", required_argument, 0, 'x'},
+        {"blacklist", required_argument, 0, OPT_BLACKLIST},
+        {"dnsbl", required_argument, 0, OPT_DNSBL},
+        {"dnsbl-resolver", required_argument, 0, OPT_DNSBL_RESOLVER},
+        {"blacklist-refresh", required_argument, 0, OPT_BLACKLIST_REFRESH},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
         {"wipeignore", no_argument, &fWipeBan, 1},
@@ -198,6 +217,27 @@ public:
           break;
         }
 
+        case OPT_BLACKLIST: {
+          blacklist_file = optarg;
+          break;
+        }
+
+        case OPT_DNSBL: {
+          dnsbl_zones.emplace_back(optarg);
+          break;
+        }
+
+        case OPT_DNSBL_RESOLVER: {
+          dnsbl_resolver = optarg;
+          break;
+        }
+
+        case OPT_BLACKLIST_REFRESH: {
+          int n = strtol(optarg, NULL, 10);
+          if (n >= 60) nBlacklistRefresh = n;
+          break;
+        }
+
         case '?': {
           showHelp = true;
           break;
@@ -285,7 +325,8 @@ public:
       std::vector<addr_t> cache;
       time_t cacheTime;
       unsigned int cacheHits;
-      FlagSpecificData() : nIPv4(0), nIPv6(0), cacheTime(0), cacheHits(0) {}
+      uint64_t blacklistGeneration;
+      FlagSpecificData() : nIPv4(0), nIPv6(0), cacheTime(0), cacheHits(0), blacklistGeneration(0) {}
   };
 
   dns_opt_t dns_opt; // must be first
@@ -302,8 +343,9 @@ public:
     }
     time_t now = time(NULL);
     FlagSpecificData& thisflag = perflag[requestedFlags];
+    uint64_t blacklistGeneration = gBlacklist.GetGeneration();
     thisflag.cacheHits++;
-    if (force || thisflag.cacheHits * 400 > (thisflag.cache.size()*thisflag.cache.size()) || (thisflag.cacheHits*thisflag.cacheHits * 20 > thisflag.cache.size() && (now - thisflag.cacheTime > 5))) {
+    if (force || thisflag.blacklistGeneration != blacklistGeneration || thisflag.cacheHits * 400 > (thisflag.cache.size()*thisflag.cache.size()) || (thisflag.cacheHits*thisflag.cacheHits * 20 > thisflag.cache.size() && (now - thisflag.cacheTime > 5))) {
       set<CNetAddr> ips;
       db.GetIPs(ips, requestedFlags, 1000, nets);
       dbQueries++;
@@ -330,6 +372,7 @@ public:
       }
       thisflag.cacheHits = 0;
       thisflag.cacheTime = now;
+      thisflag.blacklistGeneration = blacklistGeneration;
     }
   }
 
@@ -482,6 +525,30 @@ extern "C" void* ThreadStats(void*) {
   return nullptr;
 }
 
+extern "C" void* ThreadBlacklist(void*) {
+  do {
+    std::string error;
+    if (!gBlacklist.ReloadFile(&error)) {
+      printf("Blacklist reload failed: %s\n", error.c_str());
+    }
+    if (gBlacklist.DnsblEnabled()) {
+      vector<CAddrReport> reports = db.GetAll();
+      vector<CNetAddr> addrs;
+      addrs.reserve(reports.size());
+      for (vector<CAddrReport>::const_iterator it = reports.begin(); it != reports.end(); it++) {
+        addrs.push_back(it->ip);
+      }
+      int checked = gBlacklist.RefreshDnsbl(addrs);
+      printf("Blacklist refreshed: %i DNSBL checks, %u file entries, %u DNSBL-listed nodes\n",
+             checked,
+             (unsigned int)gBlacklist.GetFileEntryCount(),
+             (unsigned int)gBlacklist.GetDnsblListedCount());
+    }
+    Sleep(gBlacklist.GetRefreshSeconds() * 1000);
+  } while(1);
+  return nullptr;
+}
+
 static const string mainnet_seeds[] = {"dnsseed.litecoinpool.org", "seed-a.litecoin.loshan.co.uk", "dnsseed.thrasher.io", ""};
 static const string testnet_seeds[] = {"seed-b.litecoin.loshan.co.uk", "dnsseed-testnet.thrasher.io", ""};
 static const string *seeds = mainnet_seeds;
@@ -515,6 +582,33 @@ int main(int argc, char **argv) {
   setbuf(stdout, NULL);
   CDnsSeedOpts opts;
   opts.ParseCommandLine(argc, argv);
+  if (opts.blacklist_file) {
+    gBlacklist.SetFileName(opts.blacklist_file);
+    std::string error;
+    if (!gBlacklist.ReloadFile(&error)) {
+      fprintf(stderr, "Could not load blacklist: %s\n", error.c_str());
+      exit(1);
+    }
+    printf("Loaded %u blacklist entries from %s\n", (unsigned int)gBlacklist.GetFileEntryCount(), opts.blacklist_file);
+  }
+  for (vector<string>::const_iterator it = opts.dnsbl_zones.begin(); it != opts.dnsbl_zones.end(); it++) {
+    gBlacklist.AddDnsblZone(*it);
+  }
+  if (opts.dnsbl_resolver) {
+    CService resolver(opts.dnsbl_resolver, 53, true);
+    if (!resolver.IsValid()) {
+      fprintf(stderr, "Invalid DNSBL resolver: %s\n", opts.dnsbl_resolver);
+      exit(1);
+    }
+    gBlacklist.SetDnsblResolver(resolver);
+    printf("Using DNSBL resolver %s\n", resolver.ToStringIPPort().c_str());
+  }
+  gBlacklist.SetRefreshSeconds(opts.nBlacklistRefresh);
+  if (gBlacklist.DnsblEnabled()) {
+    printf("Using %u DNSBL zone(s); refresh interval %i seconds\n",
+           (unsigned int)opts.dnsbl_zones.size(),
+           gBlacklist.GetRefreshSeconds());
+  }
   printf("Supporting whitelisted filters: ");
   for (std::set<uint64_t>::const_iterator it = opts.filter_whitelist.begin(); it != opts.filter_whitelist.end(); it++) {
       if (it != opts.filter_whitelist.begin()) {
@@ -601,7 +695,7 @@ int main(int argc, char **argv) {
         db.ResetIgnores();
     printf("done\n");
   }
-  pthread_t threadDns, threadSeed, threadDump, threadStats;
+  pthread_t threadDns, threadSeed, threadDump, threadStats, threadBlacklist;
   if (fDNS) {
     printf("Starting %i DNS threads for %s on %s (port %i)...", opts.nDnsThreads, opts.host, opts.ns, opts.nPort);
     dnsThread.clear();
@@ -627,6 +721,9 @@ int main(int argc, char **argv) {
   pthread_attr_destroy(&attr_crawler);
   printf("done\n");
   pthread_create(&threadStats, NULL, ThreadStats, NULL);
+  if (gBlacklist.Enabled()) {
+    pthread_create(&threadBlacklist, NULL, ThreadBlacklist, NULL);
+  }
   pthread_create(&threadDump, NULL, ThreadDumper, NULL);
   void* res;
   pthread_join(threadDump, &res);

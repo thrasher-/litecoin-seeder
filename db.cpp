@@ -1,4 +1,5 @@
 #include "db.h"
+#include "blacklist.h"
 #include <stdlib.h>
 
 using namespace std;
@@ -134,6 +135,8 @@ void CAddrDb::Add_(const CAddress &addr, bool force) {
   if (!force && !addr.IsRoutable())
     return;
   CService ipp(addr);
+  if (gBlacklist.IsBlacklisted(ipp))
+    return;
   if (banned.count(ipp)) {
     time_t bantime = banned[ipp];
     if (force || (bantime < time(NULL) && addr.nTime > bantime))
@@ -174,14 +177,14 @@ void CAddrDb::GetIPs_(set<CNetAddr>& ips, uint64_t requestedFlags, int max, cons
     } else {
       id = *ourId.begin();
     }
-    if (id >= 0 && (idToInfo[id].services & requestedFlags) == requestedFlags) {
+    if (id >= 0 && (idToInfo[id].services & requestedFlags) == requestedFlags && !gBlacklist.IsBlacklisted(idToInfo[id].ip)) {
       ips.insert(idToInfo[id].ip);
     }
     return;
   }
   std::vector<int> goodIdFiltered;
   for (std::set<int>::const_iterator it = goodId.begin(); it != goodId.end(); it++) {
-    if ((idToInfo[*it].services & requestedFlags) == requestedFlags)
+    if ((idToInfo[*it].services & requestedFlags) == requestedFlags && !gBlacklist.IsBlacklisted(idToInfo[*it].ip))
       goodIdFiltered.push_back(*it);
   }
 
