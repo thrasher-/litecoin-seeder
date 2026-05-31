@@ -21,6 +21,10 @@ int main()
 
     assert(!CBlacklist::ParseEntry("not-an-ip", entry));
     assert(!CBlacklist::ParseEntry("192.0.2.0/33", entry));
+    assert(CBlacklist::FormatLogEntry(0, "listed", CNetAddr("203.0.113.10", false), "zen.spamhaus.org=127.0.0.2") ==
+           "1970-01-01T00:00:00Z listed 203.0.113.10 zen.spamhaus.org=127.0.0.2");
+    assert(CBlacklist::FormatLogEntry(0, "unlisted", CNetAddr("203.0.113.10", false), "") ==
+           "1970-01-01T00:00:00Z unlisted 203.0.113.10");
 
     const char* path = "blacklist_tests.tmp";
     {

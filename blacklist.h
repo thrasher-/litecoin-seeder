@@ -28,6 +28,7 @@ class CBlacklist
 private:
     mutable CCriticalSection cs;
     std::string fileName;
+    std::string logFileName;
     std::vector<CBlacklistEntry> fileEntries;
     std::vector<std::string> dnsblZones;
     CService dnsblResolver;
@@ -52,8 +53,10 @@ public:
     CBlacklist();
 
     static bool ParseEntry(const std::string& line, CBlacklistEntry& entry);
+    static std::string FormatLogEntry(int64_t timestamp, const std::string& action, const CNetAddr& addr, const std::string& reason);
 
     void SetFileName(const std::string& fileNameIn);
+    void SetLogFileName(const std::string& logFileNameIn);
     void AddDnsblZone(const std::string& zone);
     void SetDnsblResolver(const CService& resolver);
     void SetRefreshSeconds(int seconds);

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -100,6 +101,29 @@ static bool LookupSystemARecords(const string& name, vector<CNetAddr>& answers)
     return true;
 }
 
+struct DnsblLogChange
+{
+    int64_t timestamp;
+    string action;
+    CNetAddr addr;
+    string reason;
+};
+
+static bool AppendLogChanges(const string& path, const vector<DnsblLogChange>& changes)
+{
+    if (path.empty() || changes.empty())
+        return true;
+
+    ofstream file(path.c_str(), ios::out | ios::app);
+    if (!file.is_open())
+        return false;
+
+    for (vector<DnsblLogChange>::const_iterator it = changes.begin(); it != changes.end(); it++) {
+        file << CBlacklist::FormatLogEntry(it->timestamp, it->action, it->addr, it->reason) << "\n";
+    }
+    return true;
+}
+
 CBlacklistEntry::CBlacklistEntry() : prefixBits(0)
 {
 }
@@ -174,12 +198,36 @@ bool CBlacklist::ParseEntry(const string& line, CBlacklistEntry& entry)
     return true;
 }
 
+string CBlacklist::FormatLogEntry(int64_t timestamp, const string& action, const CNetAddr& addr, const string& reason)
+{
+    time_t when = (time_t)timestamp;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    gmtime_r(&when, &tm);
+
+    char timebuf[32];
+    strftime(timebuf, sizeof(timebuf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+
+    string line = string(timebuf) + " " + action + " " + addr.ToStringIP();
+    if (!reason.empty())
+        line += " " + reason;
+    return line;
+}
+
 void CBlacklist::SetFileName(const string& fileNameIn)
 {
     CRITICAL_BLOCK(cs)
     {
         fileName = fileNameIn;
         generation++;
+    }
+}
+
+void CBlacklist::SetLogFileName(const string& logFileNameIn)
+{
+    CRITICAL_BLOCK(cs)
+    {
+        logFileName = logFileNameIn;
     }
 }
 
@@ -511,10 +559,12 @@ bool CBlacklist::CheckDnsbl(const CNetAddr& addr, const vector<string>& zones, b
 int CBlacklist::RefreshDnsbl(const vector<CNetAddr>& addrs)
 {
     vector<string> zones;
+    string logPath;
     {
         SHARED_CRITICAL_BLOCK(cs)
         {
             zones = dnsblZones;
+            logPath = logFileName;
         }
     }
     if (zones.empty())
@@ -541,6 +591,7 @@ int CBlacklist::RefreshDnsbl(const vector<CNetAddr>& addrs)
     if (updates.empty())
         return checked;
 
+    vector<DnsblLogChange> logChanges;
     CRITICAL_BLOCK(cs)
     {
         bool changed = false;
@@ -548,11 +599,43 @@ int CBlacklist::RefreshDnsbl(const vector<CNetAddr>& addrs)
             map<CNetAddr, DnsblResult>::iterator old = dnsblCache.find(it->first);
             if (old == dnsblCache.end() || old->second.listed != it->second.listed || old->second.reason != it->second.reason)
                 changed = true;
+            if (old == dnsblCache.end()) {
+                if (it->second.listed) {
+                    DnsblLogChange change;
+                    change.timestamp = it->second.checkedAt;
+                    change.action = "listed";
+                    change.addr = it->first;
+                    change.reason = it->second.reason;
+                    logChanges.push_back(change);
+                }
+            } else if (old->second.listed && !it->second.listed) {
+                DnsblLogChange change;
+                change.timestamp = it->second.checkedAt;
+                change.action = "unlisted";
+                change.addr = it->first;
+                logChanges.push_back(change);
+            } else if (!old->second.listed && it->second.listed) {
+                DnsblLogChange change;
+                change.timestamp = it->second.checkedAt;
+                change.action = "listed";
+                change.addr = it->first;
+                change.reason = it->second.reason;
+                logChanges.push_back(change);
+            } else if (old->second.listed && it->second.listed && old->second.reason != it->second.reason) {
+                DnsblLogChange change;
+                change.timestamp = it->second.checkedAt;
+                change.action = "changed";
+                change.addr = it->first;
+                change.reason = it->second.reason;
+                logChanges.push_back(change);
+            }
             dnsblCache[it->first] = it->second;
         }
         if (changed)
             generation++;
     }
+    if (!AppendLogChanges(logPath, logChanges))
+        fprintf(stderr, "Blacklist log failed: cannot append to %s\n", logPath.c_str());
     return checked;
 }
 

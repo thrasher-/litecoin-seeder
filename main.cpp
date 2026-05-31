@@ -36,13 +36,14 @@ public:
   const char *ipv6_proxy;
   const char *magic;
   const char *blacklist_file;
+  const char *blacklist_log;
   const char *dnsbl_resolver;
   int nBlacklistRefresh;
   std::vector<string> vSeeds;
   std::vector<string> dnsbl_zones;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), blacklist_file(NULL), dnsbl_resolver(NULL), nBlacklistRefresh(3600) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), blacklist_file(NULL), blacklist_log(NULL), dnsbl_resolver(NULL), nBlacklistRefresh(3600) {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "Litecoin-seeder\n"
@@ -65,6 +66,7 @@ public:
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
                               "--blacklist <file>        Suppress IPs/CIDRs listed in file\n"
+                              "--blacklist-log <file>    Append DNSBL-listed/unlisted peer changes to file\n"
                               "--dnsbl <zone>            Suppress IPv4 nodes listed in DNSBL zone (repeatable)\n"
                               "--dnsbl-resolver <ip:port> DNS resolver for DNSBL checks (default: system resolver)\n"
                               "--blacklist-refresh <n>   Seconds between blacklist reloads/DNSBL refreshes (default 3600)\n"
@@ -76,6 +78,7 @@ public:
     bool showHelp = false;
     enum {
       OPT_BLACKLIST = 1000,
+      OPT_BLACKLIST_LOG,
       OPT_DNSBL,
       OPT_DNSBL_RESOLVER,
       OPT_BLACKLIST_REFRESH
@@ -99,6 +102,7 @@ public:
         {"magic", required_argument, 0, 'q'},
         {"minheight", required_argument, 0, 'x'},
         {"blacklist", required_argument, 0, OPT_BLACKLIST},
+        {"blacklist-log", required_argument, 0, OPT_BLACKLIST_LOG},
         {"dnsbl", required_argument, 0, OPT_DNSBL},
         {"dnsbl-resolver", required_argument, 0, OPT_DNSBL_RESOLVER},
         {"blacklist-refresh", required_argument, 0, OPT_BLACKLIST_REFRESH},
@@ -219,6 +223,11 @@ public:
 
         case OPT_BLACKLIST: {
           blacklist_file = optarg;
+          break;
+        }
+
+        case OPT_BLACKLIST_LOG: {
+          blacklist_log = optarg;
           break;
         }
 
@@ -590,6 +599,16 @@ int main(int argc, char **argv) {
       exit(1);
     }
     printf("Loaded %u blacklist entries from %s\n", (unsigned int)gBlacklist.GetFileEntryCount(), opts.blacklist_file);
+  }
+  if (opts.blacklist_log) {
+    FILE* file = fopen(opts.blacklist_log, "a");
+    if (file == NULL) {
+      fprintf(stderr, "Could not open blacklist log: %s\n", opts.blacklist_log);
+      exit(1);
+    }
+    fclose(file);
+    gBlacklist.SetLogFileName(opts.blacklist_log);
+    printf("Logging blacklist changes to %s\n", opts.blacklist_log);
   }
   for (vector<string>::const_iterator it = opts.dnsbl_zones.begin(); it != opts.dnsbl_zones.end(); it++) {
     gBlacklist.AddDnsblZone(*it);

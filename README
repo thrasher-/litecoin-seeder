@@ -116,6 +116,22 @@ seconds by default. Adjust the interval with:
 --blacklist-refresh 1800
 ```
 
+To audit DNSBL suppression decisions, append state changes to a separate log:
+
+```
+./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
+  --dnsbl zen.spamhaus.org \
+  --blacklist-log dnsseed.blacklist.log
+```
+
+The log records DNSBL transitions only, so repeated refreshes do not rewrite the
+same listed peers. Example entries:
+
+```
+2026-05-31T05:17:00Z listed 203.0.113.10 zen.spamhaus.org=127.0.0.2
+2026-05-31T06:17:00Z unlisted 203.0.113.10
+```
+
 TESTING
 -------
 
