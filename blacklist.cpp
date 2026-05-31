@@ -244,6 +244,22 @@ bool CBlacklist::IsSpamhausErrorAnswer(const string& zone, const CNetAddr& answe
            answer.GetByte(1) == 255;
 }
 
+string CBlacklist::FormatDnsblReason(const string& zone, const CNetAddr& answer)
+{
+    string logZone = zone;
+    const string dqsSuffix = ".dq.spamhaus.net";
+    size_t suffix = logZone.rfind(dqsSuffix);
+    if (suffix != string::npos && suffix + dqsSuffix.size() == logZone.size()) {
+        string prefix = logZone.substr(0, suffix);
+        size_t dataset = prefix.rfind('.');
+        if (dataset != string::npos && dataset + 1 < prefix.size())
+            logZone = "KEY." + prefix.substr(dataset + 1) + dqsSuffix;
+        else if (!prefix.empty())
+            logZone = "KEY." + prefix + dqsSuffix;
+    }
+    return logZone + "=" + answer.ToStringIP();
+}
+
 string CBlacklist::FormatLogEntry(int64_t timestamp, const string& action, const CNetAddr& addr, const string& reason)
 {
     string line = FormatUtcTimestamp(timestamp) + " " + action + " " + addr.ToStringIP();
@@ -582,7 +598,6 @@ bool CBlacklist::CheckDnsbl(const CNetAddr& addr, const vector<string>& zones, b
         for (vector<CNetAddr>::const_iterator answer = answers.begin(); answer != answers.end(); answer++) {
             if (!answer->IsIPv4())
                 continue;
-            string answerText = answer->ToStringIP();
             if (IsSpamhausErrorAnswer(*zone, *answer))
                 continue;
             zoneReliable = true;
@@ -590,7 +605,7 @@ bool CBlacklist::CheckDnsbl(const CNetAddr& addr, const vector<string>& zones, b
                 listed = true;
                 if (!reason.empty())
                     reason += ", ";
-                reason += *zone + "=" + answerText;
+                reason += FormatDnsblReason(*zone, *answer);
             }
         }
         reliableAnswer = reliableAnswer || zoneReliable;

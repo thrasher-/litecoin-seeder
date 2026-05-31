@@ -30,6 +30,10 @@ int main()
     assert(CBlacklist::IsSpamhausErrorAnswer("example.sbl-xbl.dq.spamhaus.net", CNetAddr("127.255.255.254", false)));
     assert(!CBlacklist::IsSpamhausErrorAnswer("example.sbl-xbl.dq.spamhaus.net", CNetAddr("127.0.0.2", false)));
     assert(!CBlacklist::IsSpamhausErrorAnswer("b.barracudacentral.org", CNetAddr("127.255.255.254", false)));
+    assert(CBlacklist::FormatDnsblReason("example.sbl-xbl.dq.spamhaus.net", CNetAddr("127.0.0.2", false)) ==
+           "KEY.sbl-xbl.dq.spamhaus.net=127.0.0.2");
+    assert(CBlacklist::FormatDnsblReason("b.barracudacentral.org", CNetAddr("127.0.0.2", false)) ==
+           "b.barracudacentral.org=127.0.0.2");
     assert(CBlacklist::FormatLogEntry(0, "listed", CNetAddr("203.0.113.10", false), "zen.spamhaus.org=127.0.0.2") ==
            "1970-01-01T00:00:00Z listed 203.0.113.10 zen.spamhaus.org=127.0.0.2");
     assert(CBlacklist::FormatLogEntry(0, "unlisted", CNetAddr("203.0.113.10", false), "") ==
