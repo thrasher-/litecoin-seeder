@@ -9,8 +9,12 @@ dnsseed: $(OBJS)
 blacklist_tests: blacklist_tests.o blacklist.o netbase.o util.o
 	g++ -pthread $(LDFLAGS) -o blacklist_tests blacklist_tests.o blacklist.o netbase.o util.o $(LIBS)
 
-check: blacklist_tests
+db_tests: db_tests.o db.o blacklist.o netbase.o protocol.o util.o
+	g++ -pthread $(LDFLAGS) -o db_tests db_tests.o db.o blacklist.o netbase.o protocol.o util.o $(LIBS)
+
+check: blacklist_tests db_tests
 	./blacklist_tests
+	./db_tests
 
 %.o: %.cpp *.h
 	g++ -std=c++11 -pthread $(CXXFLAGS) -Wall -Wno-unused -Wno-sign-compare -Wno-reorder -Wno-comment -c -o $@ $<

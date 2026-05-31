@@ -86,8 +86,8 @@ For DNSBL-based suppression, pass one or more DNSBL zones:
   --dnsbl all.spamrats.com
 ```
 
-DNSBLs are checked against IPv4 nodes by reversing the octets and querying the
-zone. For example `203.0.113.10` is checked as:
+DNSBLs are checked against currently good IPv4 nodes by reversing the octets
+and querying the zone. For example `203.0.113.10` is checked as:
 
 ```
 10.113.0.203.zen.spamhaus.org

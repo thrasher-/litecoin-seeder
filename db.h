@@ -255,6 +255,20 @@ public:
     }
     return ret;
   }
+
+  std::vector<CNetAddr> GetGoodIPs() {
+    std::vector<CNetAddr> ret;
+    SHARED_CRITICAL_BLOCK(cs) {
+      ret.reserve(goodId.size());
+      for (std::set<int>::const_iterator it = goodId.begin(); it != goodId.end(); it++) {
+        std::map<int, CAddrInfo>::const_iterator info = idToInfo.find(*it);
+        if (info != idToInfo.end()) {
+          ret.push_back(info->second.ip);
+        }
+      }
+    }
+    return ret;
+  }
   
   // serialization code
   // format:

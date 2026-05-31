@@ -541,12 +541,7 @@ extern "C" void* ThreadBlacklist(void*) {
       printf("Blacklist reload failed: %s\n", error.c_str());
     }
     if (gBlacklist.DnsblEnabled()) {
-      vector<CAddrReport> reports = db.GetAll();
-      vector<CNetAddr> addrs;
-      addrs.reserve(reports.size());
-      for (vector<CAddrReport>::const_iterator it = reports.begin(); it != reports.end(); it++) {
-        addrs.push_back(it->ip);
-      }
+      vector<CNetAddr> addrs = db.GetGoodIPs();
       int checked = gBlacklist.RefreshDnsbl(addrs);
       printf("Blacklist refreshed: %i DNSBL checks, %u file entries, %u DNSBL-listed nodes\n",
              checked,
