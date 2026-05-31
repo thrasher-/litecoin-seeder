@@ -53,6 +53,8 @@ public:
     CBlacklist();
 
     static bool ParseEntry(const std::string& line, CBlacklistEntry& entry);
+    static bool IsSpamhausZone(const std::string& zone);
+    static bool IsSpamhausErrorAnswer(const std::string& zone, const CNetAddr& answer);
     static std::string FormatLogEntry(int64_t timestamp, const std::string& action, const CNetAddr& addr, const std::string& reason);
     static std::string FormatStatusLogEntry(int64_t timestamp, const std::string& action, const std::string& detail);
 

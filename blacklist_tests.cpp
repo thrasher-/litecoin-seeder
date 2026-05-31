@@ -23,6 +23,13 @@ int main()
 
     assert(!CBlacklist::ParseEntry("not-an-ip", entry));
     assert(!CBlacklist::ParseEntry("192.0.2.0/33", entry));
+    assert(CBlacklist::IsSpamhausZone("sbl.spamhaus.org"));
+    assert(CBlacklist::IsSpamhausZone("example.sbl-xbl.dq.spamhaus.net"));
+    assert(!CBlacklist::IsSpamhausZone("b.barracudacentral.org"));
+    assert(CBlacklist::IsSpamhausErrorAnswer("sbl.spamhaus.org", CNetAddr("127.255.255.254", false)));
+    assert(CBlacklist::IsSpamhausErrorAnswer("example.sbl-xbl.dq.spamhaus.net", CNetAddr("127.255.255.254", false)));
+    assert(!CBlacklist::IsSpamhausErrorAnswer("example.sbl-xbl.dq.spamhaus.net", CNetAddr("127.0.0.2", false)));
+    assert(!CBlacklist::IsSpamhausErrorAnswer("b.barracudacentral.org", CNetAddr("127.255.255.254", false)));
     assert(CBlacklist::FormatLogEntry(0, "listed", CNetAddr("203.0.113.10", false), "zen.spamhaus.org=127.0.0.2") ==
            "1970-01-01T00:00:00Z listed 203.0.113.10 zen.spamhaus.org=127.0.0.2");
     assert(CBlacklist::FormatLogEntry(0, "unlisted", CNetAddr("203.0.113.10", false), "") ==

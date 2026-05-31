@@ -230,6 +230,20 @@ bool CBlacklist::ParseEntry(const string& line, CBlacklistEntry& entry)
     return true;
 }
 
+bool CBlacklist::IsSpamhausZone(const string& zone)
+{
+    return zone.find("spamhaus.org") != string::npos || zone.find("spamhaus.net") != string::npos;
+}
+
+bool CBlacklist::IsSpamhausErrorAnswer(const string& zone, const CNetAddr& answer)
+{
+    return IsSpamhausZone(zone) &&
+           answer.IsIPv4() &&
+           answer.GetByte(3) == 127 &&
+           answer.GetByte(2) == 255 &&
+           answer.GetByte(1) == 255;
+}
+
 string CBlacklist::FormatLogEntry(int64_t timestamp, const string& action, const CNetAddr& addr, const string& reason)
 {
     string line = FormatUtcTimestamp(timestamp) + " " + action + " " + addr.ToStringIP();
@@ -569,11 +583,7 @@ bool CBlacklist::CheckDnsbl(const CNetAddr& addr, const vector<string>& zones, b
             if (!answer->IsIPv4())
                 continue;
             string answerText = answer->ToStringIP();
-            bool spamhausError = zone->find("spamhaus.org") != string::npos &&
-                                 answer->GetByte(3) == 127 &&
-                                 answer->GetByte(2) == 255 &&
-                                 answer->GetByte(1) == 255;
-            if (spamhausError)
+            if (IsSpamhausErrorAnswer(*zone, *answer))
                 continue;
             zoneReliable = true;
             if (answer->GetByte(3) == 127) {
