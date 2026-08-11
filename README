@@ -51,15 +51,23 @@ This will produce the `dnsseed` binary.
 BLACKLISTING
 ------------
 
-`dnsseed` can suppress nodes from DNS responses using a local blacklist file,
-DNSBL lookups, or both. Blacklist checks are applied when peers are added and
-when DNS answer caches are built. DNSBL checks run in a background thread; they
-are not performed while answering DNS requests.
+A DNS seed publishes A/AAAA records for machines it does not control, so its
+domain accumulates whatever reputation those addresses carry. `dnsseed` can
+suppress nodes from DNS answers using a local blacklist file, DNSBL lookups, or
+both.
 
-For a static blacklist, create a file containing one IP address or CIDR range
-per line. `#` starts a comment.
+The DNSBL check fails closed. An address is published only when every required
+zone has affirmatively said it is not listed, and said so recently. An address
+that has never been checked, or whose verdict has expired, is not published.
+This is the difference between suppressing bad addresses after something
+notices them and not publishing addresses that have not been cleared.
 
-Example `blacklist.txt`:
+Checks run in a background thread, never while answering a DNS request.
+
+Blacklist file
+~~~~~~~~~~~~~~
+
+One IP address or CIDR range per line. `#` starts a comment.
 
 ```
 # Exact IPs
@@ -70,71 +78,244 @@ Example `blacklist.txt`:
 2001:4860:4860::/48
 ```
 
-Run with:
-
 ```
 ./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
   --blacklist blacklist.txt
 ```
 
-For DNSBL-based suppression, pass one or more DNSBL zones:
+The file is reloaded every `--blacklist-refresh` seconds, so a cron job that
+rewrites it (from Spamhaus DROP, Team Cymru bogons, or your own additions) takes
+effect without a restart. File entries are also the only filter applied to the
+crawler itself: a listed address is never added to the database at all.
+
+DNSBL zones
+~~~~~~~~~~~
+
+```
+--dnsbl zone[:codes][:v6][:canary=<ip>][:canary6=[<ip>]]
+```
+
+`codes` is a comma separated list of final octets, or `lo-hi` ranges, that count
+as a listing. **Set this.** With no codes, any answer in `127.0.0.0/8` counts,
+and for `zen` that includes `127.0.0.10` and `127.0.0.11`, which are PBL — they
+mean only that the address is a dynamic or residential IP that should not be
+sending mail directly. That describes a large share of honest nodes and says
+nothing about reputation. The codes worth acting on in `zen` are:
+
+```
+  2      SBL
+  3      SBL CSS
+  4-7    XBL (CBL)
+  9      DROP
+  10,11  PBL -- do NOT include
+```
 
 ```
 ./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
-  --dnsbl zen.spamhaus.org \
-  --dnsbl b.barracudacentral.org \
-  --dnsbl all.spamrats.com
+  --dnsbl 'zen.dq.spamhaus.net:2,3,4-7,9'
 ```
 
-DNSBLs are checked against currently good IPv4 nodes by reversing the octets
-and querying the zone. For example `203.0.113.10` is checked as:
+Addresses are queried with the octets reversed, `203.0.113.10` as
+`10.113.0.203.<zone>`. A zone marked `:v6` is also queried for IPv6 nodes, with
+the nibbles reversed the way `ip6.arpa` does. Without `:v6` a zone is not
+consulted about IPv6 at all, and IPv6 nodes are then filtered only by
+`--blacklist`; `dnsseed` warns about this at startup.
+
+A zone passed with `--dnsbl-advisory` instead of `--dnsbl` still suppresses what
+it lists, but is not required to answer for an address to be cleared. Use it for
+a second opinion you do not want to be a dependency.
+
+Canaries
+~~~~~~~~
+
+Every zone is asked about an address it is known to list, by default
+`127.0.0.2`, the conventional DNSBL test entry. If that lookup does not come
+back listed, the zone is not answering us and is dropped from the pass: it
+clears nothing, and a `canary-fail` line goes to the blacklist log and the
+console status line.
+
+This is not paranoia. An expired or mistyped Spamhaus DQS key answers NXDOMAIN,
+which is indistinguishable from "not listed" — without the canary, a dead key
+silently clears every address it is asked about and filtering quietly stops.
+
+Verdicts already recorded are left alone when a canary fails, so a broken key
+degrades over `--blacklist-max-age` rather than emptying the seed instantly.
+That window is the time you have to notice and fix it.
+
+An IPv6 canary must be bracketed, because its colons would otherwise be read as
+spec separators: `canary6=[2001:db8::1]`. Set one on any `:v6` zone — a zone
+that answers IPv4 but is blind to IPv6 otherwise looks like it is clearing every
+IPv6 node. `canary=off` disables the check, and is a bad idea.
+
+Resolver
+~~~~~~~~
+
+Use a local recursive resolver or Spamhaus DQS. Avoid large public resolvers
+such as `1.1.1.1` or `8.8.8.8` for DNSBL checks; they can produce blocked,
+rewritten, or false-negative answers, and Spamhaus returns `127.255.255.254`
+for its free zones when queries arrive through one. Answers in
+`127.255.255.0/24` are treated as query or configuration errors, never as
+listings and never as clearances.
 
 ```
-10.113.0.203.zen.spamhaus.org
+--dnsbl-resolver 127.0.0.1:53
 ```
 
-A response in `127.0.0.0/8` is treated as listed. For Spamhaus, responses in
-`127.255.255.0/24` are treated as query/configuration errors, not listings.
-This matters because Spamhaus may return `127.255.255.254` when DNSBL queries
-arrive through a public or open resolver.
+A DQS key is part of the zone name, so keep it out of the repository and out of
+shell history — pass it from a systemd unit or an environment file with
+restricted permissions. `dnsseed` redacts it to `KEY.zen.dq.spamhaus.net` in
+every log line and in the verdict cache, so the key never reaches disk through
+them.
 
-Use a local recursive resolver or Spamhaus DQS for production. Avoid relying on
-large public resolvers such as `1.1.1.1` or `8.8.8.8` for DNSBL checks; they
-can produce blocked, rewritten, or false-negative responses. To force a
-specific resolver:
-
-```
-./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
-  --dnsbl zen.spamhaus.org \
-  --dnsbl-resolver 127.0.0.1:53
-```
-
-The blacklist file is reloaded and DNSBL entries are refreshed every 3600
-seconds by default. Adjust the interval with:
+Timing and persistence
+~~~~~~~~~~~~~~~~~~~~~~
 
 ```
---blacklist-refresh 1800
+--blacklist-refresh 3600    # recheck a verdict after this long
+--blacklist-max-age 21600   # a verdict stops counting after this long
+--blacklist-cache <file>    # keep verdicts across restarts
 ```
 
-To audit DNSBL suppression decisions and refresh progress, append refresh status
-and state changes to a separate log:
+A pass runs every minute and checks up to 250 addresses that have no verdict or
+a verdict due for renewal, never checked first, then least recently checked. A
+newly good node is therefore usually publishable within a minute rather than
+waiting a full refresh interval.
+
+The max age is held to at least three times the refresh interval, so one
+resolver outage cannot expire every verdict at once.
+
+Query volume is roughly (good nodes) x (required zones) / (refresh interval), so
+2000 good nodes against one zone at the default 3600 is about 48k lookups a day.
+Check that against your DQS plan, and raise `--blacklist-refresh` if it does not
+fit; the pass cap of 250 addresses per minute is well above what that needs.
+
+Without `--blacklist-cache`, a restart starts from no verdicts and publishes
+nothing until the first passes complete. With it, verdicts survive.
+
+Rolling it out
+~~~~~~~~~~~~~~
+
+Strict clearance can remove a lot of nodes if a zone or its codes are
+misconfigured. Measure first:
 
 ```
-./dnsseed -h dnsseed.example.com -n vps.example.com -m hostmaster.example.com \
-  --dnsbl zen.spamhaus.org \
-  --blacklist-log dnsseed.blacklist.log
+--blacklist-report-only
 ```
 
-The log records refresh start/progress/finish lines plus DNSBL transitions. It
-does not rewrite the same listed peers on every refresh. Example entries:
+Unchecked and stale addresses are then counted but still published, while file
+matches and real listings are still suppressed. The console status line and the
+`tally` line in the blacklist log show what strict mode would cost:
 
 ```
-2026-05-31T05:16:55Z refresh-start peers=321 ipv4=321 zones=2 file_entries=0
-2026-05-31T05:16:58Z refresh-progress processed=50/321 checked=50 errors=0 listed=1
-2026-05-31T05:17:00Z listed 203.0.113.10 zen.spamhaus.org=127.0.0.2
-2026-05-31T05:17:08Z refresh-finish processed=321/321 checked=321 errors=0 listed=7 file_entries=0 dnsbl_listed=7
+2026-05-31T05:17:08Z tally total=321 publish=290 file=2 listed=7 unchecked=20 stale=2
+```
+
+When `unchecked` and `stale` settle near zero and `listed` looks plausible, drop
+the flag.
+
+Logs
+~~~~
+
+```
+--blacklist-log <file>
+```
+
+Refresh progress, canary failures, and listing transitions. Peers already listed
+are not rewritten on every pass.
+
+```
+2026-05-31T05:16:55Z refresh-start peers=321 due=45 outstanding=45 zones=2 file_entries=0
+2026-05-31T05:16:58Z refresh-progress processed=50/45 checked=50 errors=0 listed=1
+2026-05-31T05:17:00Z listed 203.0.113.10 KEY.zen.dq.spamhaus.net=127.0.0.2
+2026-05-31T05:17:08Z refresh-finish processed=45/45 checked=45 errors=0 listed=7 file_entries=0 dnsbl_listed=7
+2026-05-31T05:17:08Z tally total=321 publish=290 file=2 listed=7 unchecked=20 stale=2
 2026-05-31T06:17:00Z unlisted 203.0.113.10
+2026-05-31T07:17:00Z canary-fail KEY.zen.dq.spamhaus.net did not list its canary 127.0.0.2
 ```
+
+```
+--served-log <file>
+```
+
+What the seed actually published, and when. This is the record to reach for when
+an abuse desk names an address and a date: without it you cannot confirm the
+address, deny it, or show that you stopped.
+
+It logs the eligible set rather than individual answers. A DNS answer is a
+random sample of that set, so the eligible set is a superset of everything the
+domain could have resolved to, and it does not record who asked.
+
+```
+2026-05-31T05:16:55Z serve-snapshot count=290
+2026-05-31T05:16:55Z serve-set 198.51.100.7
+2026-05-31T05:17:55Z serve-add 198.51.100.9
+2026-05-31T05:18:55Z serve-drop 198.51.100.7
+```
+
+A full snapshot is written at startup and hourly; transitions are written in
+between. On a seed with a couple of thousand nodes that is a few MB a day, so
+point logrotate at it — but keep the history long enough to outlive the
+complaints you may need to answer with it. `dnsseed` appends and never truncates,
+so `copytruncate` or a post-rotate restart both work.
+
+ANSWER TTL
+----------
+
+```
+--ttl <seconds>    # default 3600
+```
+
+The TTL on A/AAAA answers trades off two opposing risks, and the default is
+deliberately the higher one.
+
+Lowering it bounds how long a removed address keeps being handed out by
+resolvers that already cached it. That matters only in proportion to how often
+you actually need to remove an address.
+
+Raising it weakens a fast-flux signature. A domain that answers with a dozen
+addresses, drawn from a large pool spread across many networks, rotating on a
+short TTL, queried by thousands of hosts that keep re-querying, looks like
+botnet command-and-control to automated classifiers -- because that is exactly
+what fast-flux C&C looks like. A DNS seed matches the pattern honestly, and
+domains have been listed on Spamhaus DBL as `127.0.1.6` (botnet C&C) for it.
+
+Unless you are routinely pulling listed addresses out of the seed, the second
+risk is the larger one, so prefer a long TTL. See "Reducing the flux signature"
+below.
+
+REDUCING THE FLUX SIGNATURE
+---------------------------
+
+Blacklisting individual nodes and avoiding a fast-flux classification are
+different problems, and the second one is not solved by the first. A seed whose
+every node is spotless can still be listed for the shape of its DNS answers.
+
+What drives the classification, in rough order of weight:
+
+* how fast the published set rotates
+* how many distinct addresses an observer can collect by re-querying
+* the TTL
+* how widely the addresses are spread across networks
+* how much of the pool is in dynamic or residential space
+
+The first is the one with the most headroom. `GetIPs_` draws a fresh random
+sample of up to half the good set on every answer-cache rebuild, and the cache
+rebuilds within seconds under load, so an observer polling the seed sees the
+entire pool cycle through a few addresses at a time. That is the single
+strongest flux signal the seeder emits, and it buys nothing: clients need a
+handful of reachable peers, not a different handful every few seconds.
+
+The mitigations, cheapest first:
+
+* keep `--ttl` high (see above)
+* keep the published set stable over time rather than resampling constantly
+* serve the seed from a domain that carries nothing else, so a listing cannot
+  reach your mail or web reputation
+
+The last one is not a mitigation of the pattern, it is containment of the blast
+radius, and it is the only one that is certain to work. A DBL listing lands on
+the registered domain and everything under it, so a seed on a subdomain of a
+company domain puts that company's mail on the same listing.
 
 TESTING
 -------
