@@ -488,7 +488,12 @@ extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int 
     thisflag.cache[i] = addr[i];
     i++;
   }
-  return max;
+  // Return what was actually written, not what was hoped for. The loop above
+  // can stop early once suppressed entries are dropped, and returning `max`
+  // would make the caller serialise uninitialised slots of its stack array --
+  // which on a reused thread stack can still hold a suppressed address from an
+  // earlier query.
+  return i;
 }
 
 vector<CDnsThread*> dnsThread;
