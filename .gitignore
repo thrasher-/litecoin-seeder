@@ -1,3 +1,5 @@
 *.o
 dnsseed*
 dnsstats.log
+blacklist_tests
+db_tests

@@ -19,6 +19,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* glibc 2.38 added strlcpy/strlcat, which collide with the copies below. */
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 38))
+#define BITCOIN_HAVE_SYSTEM_STRLCPY 1
+#endif
+
+#ifndef BITCOIN_HAVE_SYSTEM_STRLCPY
+
 /*
  * Copy src to string dst of size siz.  At most siz-1 characters
  * will be copied.  Always NUL terminates (unless siz == 0).
@@ -87,4 +94,6 @@ inline size_t strlcat(char *dst, const char *src, size_t siz)
 
     return(dlen + (s - src)); /* count does not include NUL */
 }
+
+#endif // BITCOIN_HAVE_SYSTEM_STRLCPY
 #endif
