@@ -135,7 +135,10 @@ void CAddrDb::Add_(const CAddress &addr, bool force) {
   if (!force && !addr.IsRoutable())
     return;
   CService ipp(addr);
-  if (gBlacklist.IsBlacklisted(ipp))
+  // Only positively-known-bad peers are refused here. Applying the publish gate
+  // on this path would reject every peer we have not checked yet, which is all
+  // of them at startup, and the crawler would never learn anything.
+  if (gBlacklist.IsDenied(ipp))
     return;
   if (banned.count(ipp)) {
     time_t bantime = banned[ipp];
@@ -177,14 +180,14 @@ void CAddrDb::GetIPs_(set<CNetAddr>& ips, uint64_t requestedFlags, int max, cons
     } else {
       id = *ourId.begin();
     }
-    if (id >= 0 && (idToInfo[id].services & requestedFlags) == requestedFlags && !gBlacklist.IsBlacklisted(idToInfo[id].ip)) {
+    if (id >= 0 && (idToInfo[id].services & requestedFlags) == requestedFlags && gBlacklist.IsPublishable(idToInfo[id].ip)) {
       ips.insert(idToInfo[id].ip);
     }
     return;
   }
   std::vector<int> goodIdFiltered;
   for (std::set<int>::const_iterator it = goodId.begin(); it != goodId.end(); it++) {
-    if ((idToInfo[*it].services & requestedFlags) == requestedFlags && !gBlacklist.IsBlacklisted(idToInfo[*it].ip))
+    if ((idToInfo[*it].services & requestedFlags) == requestedFlags && gBlacklist.IsPublishable(idToInfo[*it].ip))
       goodIdFiltered.push_back(*it);
   }
 

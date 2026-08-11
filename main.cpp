@@ -37,13 +37,19 @@ public:
   const char *magic;
   const char *blacklist_file;
   const char *blacklist_log;
+  const char *blacklist_cache;
+  const char *served_log;
   const char *dnsbl_resolver;
   int nBlacklistRefresh;
+  int nBlacklistMaxAge;
+  int fBlacklistReportOnly;
+  int nDataTtl;
   std::vector<string> vSeeds;
   std::vector<string> dnsbl_zones;
+  std::vector<string> dnsbl_advisory_zones;
   std::set<uint64_t> filter_whitelist;
 
-  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), blacklist_file(NULL), blacklist_log(NULL), dnsbl_resolver(NULL), nBlacklistRefresh(3600) {}
+  CDnsSeedOpts() : nThreads(96), nDnsThreads(4), ip_addr("::"), nPort(53), nP2Port(0), nMinimumHeight(0), mbox(NULL), ns(NULL), host(NULL), tor(NULL), fUseTestNet(false), fWipeBan(false), fWipeIgnore(false), ipv4_proxy(NULL), ipv6_proxy(NULL), magic(NULL), blacklist_file(NULL), blacklist_log(NULL), blacklist_cache(NULL), served_log(NULL), dnsbl_resolver(NULL), nBlacklistRefresh(3600), nBlacklistMaxAge(21600), fBlacklistReportOnly(false), nDataTtl(3600) {}
 
   void ParseCommandLine(int argc, char **argv) {
     static const char *help = "Litecoin-seeder\n"
@@ -65,11 +71,17 @@ public:
                               "--p2port <port> P2P port to connect to\n"
                               "--magic <hex>   Magic string/network prefix\n"
                               "--minheight <n> Minimum height of block chain\n"
+                              "--ttl <n>                 TTL of A/AAAA answers in seconds (default 3600)\n"
                               "--blacklist <file>        Suppress IPs/CIDRs listed in file\n"
                               "--blacklist-log <file>    Append DNSBL refresh progress and peer changes to file\n"
-                              "--dnsbl <zone>            Suppress IPv4 nodes listed in DNSBL zone (repeatable)\n"
+                              "--blacklist-cache <file>  Persist DNSBL verdicts across restarts\n"
+                              "--served-log <file>       Append the published answer set and its changes to file\n"
+                              "--dnsbl <spec>            Required DNSBL, zone[:codes][:v6] (repeatable)\n"
+                              "--dnsbl-advisory <spec>   DNSBL that suppresses but is not needed to clear (repeatable)\n"
                               "--dnsbl-resolver <ip:port> DNS resolver for DNSBL checks (default: system resolver)\n"
-                              "--blacklist-refresh <n>   Seconds between blacklist reloads/DNSBL refreshes (default 3600)\n"
+                              "--blacklist-refresh <n>   Seconds before a verdict is rechecked (default 3600)\n"
+                              "--blacklist-max-age <n>   Seconds before a verdict stops counting (default 21600)\n"
+                              "--blacklist-report-only   Log what strict clearance would suppress, but publish it\n"
                               "--testnet       Use testnet\n"
                               "--wipeban       Wipe list of banned nodes\n"
                               "--wipeignore    Wipe list of ignored nodes\n"
@@ -79,9 +91,14 @@ public:
     enum {
       OPT_BLACKLIST = 1000,
       OPT_BLACKLIST_LOG,
+      OPT_BLACKLIST_CACHE,
+      OPT_SERVED_LOG,
       OPT_DNSBL,
+      OPT_DNSBL_ADVISORY,
       OPT_DNSBL_RESOLVER,
-      OPT_BLACKLIST_REFRESH
+      OPT_BLACKLIST_REFRESH,
+      OPT_BLACKLIST_MAX_AGE,
+      OPT_TTL
     };
 
     while(1) {
@@ -103,9 +120,15 @@ public:
         {"minheight", required_argument, 0, 'x'},
         {"blacklist", required_argument, 0, OPT_BLACKLIST},
         {"blacklist-log", required_argument, 0, OPT_BLACKLIST_LOG},
+        {"blacklist-cache", required_argument, 0, OPT_BLACKLIST_CACHE},
+        {"served-log", required_argument, 0, OPT_SERVED_LOG},
         {"dnsbl", required_argument, 0, OPT_DNSBL},
+        {"dnsbl-advisory", required_argument, 0, OPT_DNSBL_ADVISORY},
         {"dnsbl-resolver", required_argument, 0, OPT_DNSBL_RESOLVER},
         {"blacklist-refresh", required_argument, 0, OPT_BLACKLIST_REFRESH},
+        {"blacklist-max-age", required_argument, 0, OPT_BLACKLIST_MAX_AGE},
+        {"blacklist-report-only", no_argument, &fBlacklistReportOnly, 1},
+        {"ttl", required_argument, 0, OPT_TTL},
         {"testnet", no_argument, &fUseTestNet, 1},
         {"wipeban", no_argument, &fWipeBan, 1},
         {"wipeignore", no_argument, &fWipeBan, 1},
@@ -231,8 +254,23 @@ public:
           break;
         }
 
+        case OPT_BLACKLIST_CACHE: {
+          blacklist_cache = optarg;
+          break;
+        }
+
+        case OPT_SERVED_LOG: {
+          served_log = optarg;
+          break;
+        }
+
         case OPT_DNSBL: {
           dnsbl_zones.emplace_back(optarg);
+          break;
+        }
+
+        case OPT_DNSBL_ADVISORY: {
+          dnsbl_advisory_zones.emplace_back(optarg);
           break;
         }
 
@@ -244,6 +282,18 @@ public:
         case OPT_BLACKLIST_REFRESH: {
           int n = strtol(optarg, NULL, 10);
           if (n >= 60) nBlacklistRefresh = n;
+          break;
+        }
+
+        case OPT_BLACKLIST_MAX_AGE: {
+          int n = strtol(optarg, NULL, 10);
+          if (n >= 60) nBlacklistMaxAge = n;
+          break;
+        }
+
+        case OPT_TTL: {
+          int n = strtol(optarg, NULL, 10);
+          if (n > 0 && n <= 86400) nDataTtl = n;
           break;
         }
 
@@ -389,7 +439,7 @@ public:
     dns_opt.host = opts->host;
     dns_opt.ns = opts->ns;
     dns_opt.mbox = opts->mbox;
-    dns_opt.datattl = 3600;
+    dns_opt.datattl = opts->nDataTtl;
     dns_opt.nsttl = 40000;
     dns_opt.cb = GetIPList;
     dns_opt.addr = opts->ip_addr;
@@ -405,19 +455,31 @@ public:
   }
 };
 
-static bool IsAddrBlacklisted(const addr_t& raw)
+static bool ToNetAddr(const addr_t& raw, CNetAddr& out)
 {
   if (raw.v == 4) {
     struct in_addr addr;
     memcpy(&addr, raw.data.v4, 4);
-    return gBlacklist.IsBlacklisted(CNetAddr(addr));
+    out = CNetAddr(addr);
+    return true;
   }
   if (raw.v == 6) {
     struct in6_addr addr;
     memcpy(&addr, raw.data.v6, 16);
-    return gBlacklist.IsBlacklisted(CNetAddr(addr));
+    out = CNetAddr(addr);
+    return true;
   }
   return false;
+}
+
+// Last line of defence: a verdict can land between a cache rebuild and an
+// answer, so the address is re-checked on the way out.
+static bool IsAddrSuppressed(const addr_t& raw)
+{
+  CNetAddr addr;
+  if (!ToNetAddr(raw, addr))
+    return false;
+  return !gBlacklist.IsPublishable(addr);
 }
 
 extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int max, int ipv4, int ipv6) {
@@ -453,7 +515,7 @@ extern "C" int GetIPList(void *data, char *requestedHostname, addr_t* addr, int 
     do {
         bool ok = (ipv4 && thisflag.cache[j].v == 4) ||
                   (ipv6 && thisflag.cache[j].v == 6);
-        if (ok && IsAddrBlacklisted(thisflag.cache[j])) {
+        if (ok && IsAddrSuppressed(thisflag.cache[j])) {
             if (thisflag.cache[j].v == 4)
               thisflag.nIPv4--;
             else if (thisflag.cache[j].v == 6)
@@ -554,6 +616,81 @@ extern "C" void* ThreadDumper(void*) {
   return nullptr;
 }
 
+// Latest suppression counts over the good set, refreshed by ThreadBlacklist.
+static std::atomic<unsigned int> nSuppressedFile(0);
+static std::atomic<unsigned int> nSuppressedListed(0);
+static std::atomic<unsigned int> nSuppressedUnchecked(0);
+static std::atomic<unsigned int> nSuppressedStale(0);
+static std::atomic<unsigned int> nCanaryFailures(0);
+
+// Records the set of addresses the seeder considers publishable, so an abuse
+// report naming an address and a date can be answered with a timeline instead
+// of a guess. This is the eligible set rather than any single answer: DNS
+// answers are a random sample of it, so the eligible set is a superset of
+// everything the domain could have resolved to.
+class CServedLog {
+private:
+  CCriticalSection cs;
+  std::string path;
+  std::set<std::string> last;
+  time_t lastSnapshot;
+  bool started;
+
+public:
+  CServedLog() : lastSnapshot(0), started(false) {}
+
+  void SetPath(const std::string& pathIn) {
+    CRITICAL_BLOCK(cs)
+      path = pathIn;
+  }
+
+  bool Enabled() {
+    SHARED_CRITICAL_BLOCK(cs)
+      return !path.empty();
+    return false;
+  }
+
+  void Record(const std::vector<CNetAddr>& addrs) {
+    std::set<std::string> current;
+    for (std::vector<CNetAddr>::const_iterator it = addrs.begin(); it != addrs.end(); it++)
+      current.insert(it->ToStringIP());
+
+    CRITICAL_BLOCK(cs) {
+      if (path.empty())
+        return;
+      time_t now = time(NULL);
+      FILE *f = fopen(path.c_str(), "a");
+      if (f == NULL) {
+        fprintf(stderr, "Served log failed: cannot append to %s\n", path.c_str());
+        return;
+      }
+      // A full snapshot on startup and hourly after that, so the log can be
+      // read without replaying every transition since the beginning.
+      bool snapshot = !started || now - lastSnapshot >= 3600;
+      if (snapshot) {
+        fprintf(f, "%s\n", CBlacklist::FormatStatusLogEntry(now, "serve-snapshot", strprintf("count=%u", (unsigned int)current.size())).c_str());
+        for (std::set<std::string>::const_iterator it = current.begin(); it != current.end(); it++)
+          fprintf(f, "%s\n", CBlacklist::FormatStatusLogEntry(now, "serve-set", *it).c_str());
+        lastSnapshot = now;
+      } else {
+        for (std::set<std::string>::const_iterator it = current.begin(); it != current.end(); it++) {
+          if (!last.count(*it))
+            fprintf(f, "%s\n", CBlacklist::FormatStatusLogEntry(now, "serve-add", *it).c_str());
+        }
+        for (std::set<std::string>::const_iterator it = last.begin(); it != last.end(); it++) {
+          if (!current.count(*it))
+            fprintf(f, "%s\n", CBlacklist::FormatStatusLogEntry(now, "serve-drop", *it).c_str());
+        }
+      }
+      fclose(f);
+      last.swap(current);
+      started = true;
+    }
+  }
+};
+
+static CServedLog gServedLog;
+
 extern "C" void* ThreadStats(void*) {
   bool first = true;
   do {
@@ -578,26 +715,66 @@ extern "C" void* ThreadStats(void*) {
       queries += dnsThread[i]->dbQueries;
     }
     printf("%s %i/%i available (%i tried in %is, %i new, %i active), %i banned; %llu DNS requests, %llu db queries", c, stats.nGood, stats.nAvail, stats.nTracked, stats.nAge, stats.nNew, stats.nAvail - stats.nTracked - stats.nNew, stats.nBanned, (unsigned long long)requests, (unsigned long long)queries);
+    if (gBlacklist.Enabled()) {
+      printf("; suppressed %u file/%u listed/%u unchecked/%u stale%s",
+             nSuppressedFile.load(), nSuppressedListed.load(), nSuppressedUnchecked.load(), nSuppressedStale.load(),
+             gBlacklist.ReportOnly() ? " (report-only)" : "");
+      if (nCanaryFailures.load())
+        printf("; %u DNSBL ZONE(S) NOT ANSWERING", nCanaryFailures.load());
+    }
     Sleep(1000);
   } while(1);
   return nullptr;
 }
 
+// One pass every minute keeps a newly-good node from waiting a full refresh
+// interval before it can be published, without ever running an unbounded burst
+// of DNSBL queries.
+static const int BLACKLIST_PASS_SECONDS = 60;
+static const int BLACKLIST_CHECKS_PER_PASS = 250;
+
 extern "C" void* ThreadBlacklist(void*) {
+  int64 lastReload = 0;
   do {
-    std::string error;
-    if (!gBlacklist.ReloadFile(&error)) {
-      printf("Blacklist reload failed: %s\n", error.c_str());
+    int64 now = time(NULL);
+    if (now - lastReload >= gBlacklist.GetRefreshSeconds()) {
+      std::string error;
+      if (!gBlacklist.ReloadFile(&error)) {
+        printf("Blacklist reload failed: %s\n", error.c_str());
+      }
+      lastReload = now;
     }
+
+    vector<CNetAddr> addrs = db.GetGoodIPs();
     if (gBlacklist.DnsblEnabled()) {
-      vector<CNetAddr> addrs = db.GetGoodIPs();
-      int checked = gBlacklist.RefreshDnsbl(addrs);
-      printf("Blacklist refreshed: %i DNSBL checks, %u file entries, %u DNSBL-listed nodes\n",
-             checked,
-             (unsigned int)gBlacklist.GetFileEntryCount(),
-             (unsigned int)gBlacklist.GetDnsblListedCount());
+      gBlacklist.PruneCache(addrs);
+      if (gBlacklist.RefreshDnsbl(addrs, BLACKLIST_CHECKS_PER_PASS)) {
+        std::string error;
+        if (!gBlacklist.SaveCache(&error)) {
+          printf("Blacklist cache save failed: %s\n", error.c_str());
+        }
+      }
     }
-    Sleep(gBlacklist.GetRefreshSeconds() * 1000);
+
+    nCanaryFailures = (unsigned int)gBlacklist.GetCanaryFailures().size();
+
+    CBlacklistTally tally = gBlacklist.Tally(addrs);
+    nSuppressedFile = (unsigned int)tally.file;
+    nSuppressedListed = (unsigned int)tally.listed;
+    nSuppressedUnchecked = (unsigned int)tally.unchecked;
+    nSuppressedStale = (unsigned int)tally.stale;
+
+    if (gServedLog.Enabled()) {
+      vector<CNetAddr> publishable;
+      publishable.reserve(addrs.size());
+      for (vector<CNetAddr>::const_iterator it = addrs.begin(); it != addrs.end(); it++) {
+        if (gBlacklist.IsPublishable(*it))
+          publishable.push_back(*it);
+      }
+      gServedLog.Record(publishable);
+    }
+
+    Sleep(BLACKLIST_PASS_SECONDS * 1000);
   } while(1);
   return nullptr;
 }
@@ -654,8 +831,29 @@ int main(int argc, char **argv) {
     gBlacklist.SetLogFileName(opts.blacklist_log);
     printf("Logging blacklist refresh progress and changes to %s\n", opts.blacklist_log);
   }
+  if (opts.served_log) {
+    FILE* file = fopen(opts.served_log, "a");
+    if (file == NULL) {
+      fprintf(stderr, "Could not open served log: %s\n", opts.served_log);
+      exit(1);
+    }
+    fclose(file);
+    gServedLog.SetPath(opts.served_log);
+    printf("Logging the published address set to %s\n", opts.served_log);
+  }
   for (vector<string>::const_iterator it = opts.dnsbl_zones.begin(); it != opts.dnsbl_zones.end(); it++) {
-    gBlacklist.AddDnsblZone(*it);
+    std::string error;
+    if (!gBlacklist.AddDnsblZone(*it, true, &error)) {
+      fprintf(stderr, "Invalid --dnsbl: %s\n", error.c_str());
+      exit(1);
+    }
+  }
+  for (vector<string>::const_iterator it = opts.dnsbl_advisory_zones.begin(); it != opts.dnsbl_advisory_zones.end(); it++) {
+    std::string error;
+    if (!gBlacklist.AddDnsblZone(*it, false, &error)) {
+      fprintf(stderr, "Invalid --dnsbl-advisory: %s\n", error.c_str());
+      exit(1);
+    }
   }
   if (opts.dnsbl_resolver) {
     CService resolver(opts.dnsbl_resolver, 53, true);
@@ -667,10 +865,42 @@ int main(int argc, char **argv) {
     printf("Using DNSBL resolver %s\n", resolver.ToStringIPPort().c_str());
   }
   gBlacklist.SetRefreshSeconds(opts.nBlacklistRefresh);
+  gBlacklist.SetMaxAgeSeconds(opts.nBlacklistMaxAge);
+  gBlacklist.SetReportOnly(opts.fBlacklistReportOnly);
+  // After the zones, because loading validates each cached verdict against the
+  // policy configured for its zone.
+  if (opts.blacklist_cache) {
+    gBlacklist.SetCacheFileName(opts.blacklist_cache);
+    std::string error;
+    if (!gBlacklist.LoadCache(&error)) {
+      fprintf(stderr, "Could not load blacklist cache: %s\n", error.c_str());
+      exit(1);
+    }
+  }
   if (gBlacklist.DnsblEnabled()) {
-    printf("Using %u DNSBL zone(s); refresh interval %i seconds\n",
-           (unsigned int)opts.dnsbl_zones.size(),
-           gBlacklist.GetRefreshSeconds());
+    vector<string> zones = gBlacklist.DescribeZones();
+    for (vector<string>::const_iterator it = zones.begin(); it != zones.end(); it++) {
+      printf("Using DNSBL %s\n", it->c_str());
+    }
+    printf("Recheck after %i seconds, verdicts expire after %i seconds\n",
+           gBlacklist.GetRefreshSeconds(),
+           gBlacklist.GetMaxAgeSeconds());
+    if (gBlacklist.ReportOnly()) {
+      printf("Blacklist is report-only: unchecked and stale nodes are counted but still published\n");
+    } else {
+      printf("Publishing requires a fresh clearance from every required DNSBL\n");
+    }
+    if (!gBlacklist.CoversIPv6()) {
+      printf("Warning: no DNSBL zone is marked :v6, so IPv6 nodes are only filtered by --blacklist\n");
+    } else {
+      vector<string> zoneDescs = gBlacklist.DescribeZones();
+      for (vector<string>::const_iterator it = zoneDescs.begin(); it != zoneDescs.end(); it++) {
+        if (it->find(":v6") != string::npos && it->find(":canary6=") == string::npos) {
+          printf("Warning: a :v6 zone has no canary6, so an IPv6-blind zone would look like it clears every IPv6 node\n");
+          break;
+        }
+      }
+    }
   }
   printf("Supporting whitelisted filters: ");
   for (std::set<uint64_t>::const_iterator it = opts.filter_whitelist.begin(); it != opts.filter_whitelist.end(); it++) {
@@ -760,7 +990,7 @@ int main(int argc, char **argv) {
   }
   pthread_t threadDns, threadSeed, threadDump, threadStats, threadBlacklist;
   if (fDNS) {
-    printf("Starting %i DNS threads for %s on %s (port %i)...", opts.nDnsThreads, opts.host, opts.ns, opts.nPort);
+    printf("Starting %i DNS threads for %s on %s (port %i, ttl %i)...", opts.nDnsThreads, opts.host, opts.ns, opts.nPort, opts.nDataTtl);
     dnsThread.clear();
     for (int i=0; i<opts.nDnsThreads; i++) {
       dnsThread.push_back(new CDnsThread(&opts, i));
@@ -784,7 +1014,7 @@ int main(int argc, char **argv) {
   pthread_attr_destroy(&attr_crawler);
   printf("done\n");
   pthread_create(&threadStats, NULL, ThreadStats, NULL);
-  if (gBlacklist.Enabled()) {
+  if (gBlacklist.Enabled() || gServedLog.Enabled()) {
     pthread_create(&threadBlacklist, NULL, ThreadBlacklist, NULL);
   }
   pthread_create(&threadDump, NULL, ThreadDumper, NULL);
