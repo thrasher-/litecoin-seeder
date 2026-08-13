@@ -6,6 +6,8 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <string.h>
 #include <getopt.h>
 #include <atomic>
 
@@ -451,7 +453,16 @@ public:
   }
 
   void run() {
-    dnsserver(&dns_opt);
+    // dnsserver() only returns on a setup failure; its service loop never
+    // exits. Discarding that meant a seeder which could not bind kept running,
+    // crawling, and reporting healthy to whatever supervises it while
+    // answering nothing at all. There is no useful degraded mode here: a seed
+    // that serves no DNS should be visibly dead.
+    int ret = dnsserver(&dns_opt);
+    fprintf(stderr, "\nDNS thread %i failed on port %i (dnsserver returned %i)%s\n",
+            id, dns_opt.port, ret,
+            ret == -2 ? " -- could not bind, is the port already in use?" : "");
+    exit(1);
   }
 };
 
@@ -600,22 +611,35 @@ extern "C" void* ThreadDumper(void*) {
         }
         rename("dnsseed.dat.new", "dnsseed.dat");
       }
-      FILE *d = fopen("dnsseed.dump", "w");
-      fprintf(d, "# address                                        good  lastSuccess    %%(2h)   %%(8h)   %%(1d)   %%(7d)  %%(30d)  blocks      svcs  version\n");
       double stat[5]={0,0,0,0,0};
+      // Unchecked before: a full or read-only disk turned the periodic dump
+      // into a null dereference, taking down a seeder that was otherwise fine.
+      // The totals accumulate either way, so a disk that cannot take the dump
+      // does not also silently flatten dnsstats.log.
+      FILE *d = fopen("dnsseed.dump", "w");
+      if (d == NULL)
+        fprintf(stderr, "Cannot write dnsseed.dump: %s\n", strerror(errno));
+      else
+        fprintf(d, "# address                                        good  lastSuccess    %%(2h)   %%(8h)   %%(1d)   %%(7d)  %%(30d)  blocks      svcs  version\n");
       for (vector<CAddrReport>::const_iterator it = v.begin(); it < v.end(); it++) {
         CAddrReport rep = *it;
-        fprintf(d, "%-47s  %4d  %11" PRId64 "  %6.2f%% %6.2f%% %6.2f%% %6.2f%% %6.2f%%  %6i  %08" PRIx64 "  %5i \"%s\"\n", rep.ip.ToString().c_str(), (int)rep.fGood, rep.lastSuccess, 100.0*rep.uptime[0], 100.0*rep.uptime[1], 100.0*rep.uptime[2], 100.0*rep.uptime[3], 100.0*rep.uptime[4], rep.blocks, rep.services, rep.clientVersion, rep.clientSubVersion.c_str());
+        if (d)
+          fprintf(d, "%-47s  %4d  %11" PRId64 "  %6.2f%% %6.2f%% %6.2f%% %6.2f%% %6.2f%%  %6i  %08" PRIx64 "  %5i \"%s\"\n", rep.ip.ToString().c_str(), (int)rep.fGood, rep.lastSuccess, 100.0*rep.uptime[0], 100.0*rep.uptime[1], 100.0*rep.uptime[2], 100.0*rep.uptime[3], 100.0*rep.uptime[4], rep.blocks, rep.services, rep.clientVersion, rep.clientSubVersion.c_str());
         stat[0] += rep.uptime[0];
         stat[1] += rep.uptime[1];
         stat[2] += rep.uptime[2];
         stat[3] += rep.uptime[3];
         stat[4] += rep.uptime[4];
       }
-      fclose(d);
+      if (d)
+        fclose(d);
       FILE *ff = fopen("dnsstats.log", "a");
-      fprintf(ff, "%llu %g %g %g %g %g\n", (unsigned long long)(time(NULL)), stat[0], stat[1], stat[2], stat[3], stat[4]);
-      fclose(ff);
+      if (ff == NULL) {
+        fprintf(stderr, "Cannot append dnsstats.log: %s\n", strerror(errno));
+      } else {
+        fprintf(ff, "%llu %g %g %g %g %g\n", (unsigned long long)(time(NULL)), stat[0], stat[1], stat[2], stat[3], stat[4]);
+        fclose(ff);
+      }
     }
   } while(1);
   return nullptr;
@@ -999,14 +1023,20 @@ int main(int argc, char **argv) {
     dnsThread.clear();
     for (int i=0; i<opts.nDnsThreads; i++) {
       dnsThread.push_back(new CDnsThread(&opts, i));
-      pthread_create(&threadDns, NULL, ThreadDNS, dnsThread[i]);
+      if (pthread_create(&threadDns, NULL, ThreadDNS, dnsThread[i]) != 0) {
+        fprintf(stderr, "\nCannot start DNS thread %i: %s\n", i, strerror(errno));
+        exit(1);
+      }
       printf(".");
       Sleep(20);
     }
     printf("done\n");
   }
   printf("Starting seeder...");
-  pthread_create(&threadSeed, NULL, ThreadSeeder, NULL);
+  if (pthread_create(&threadSeed, NULL, ThreadSeeder, NULL) != 0) {
+    fprintf(stderr, "\nCannot start seeder thread: %s\n", strerror(errno));
+    exit(1);
+  }
   printf("done\n");
   printf("Starting %i crawler threads...", opts.nThreads);
   pthread_attr_t attr_crawler;
@@ -1014,15 +1044,27 @@ int main(int argc, char **argv) {
   pthread_attr_setstacksize(&attr_crawler, 0x20000);
   for (int i=0; i<opts.nThreads; i++) {
     pthread_t thread;
-    pthread_create(&thread, &attr_crawler, ThreadCrawler, &opts.nThreads);
+    if (pthread_create(&thread, &attr_crawler, ThreadCrawler, &opts.nThreads) != 0) {
+      fprintf(stderr, "\nCannot start crawler thread %i: %s\n", i, strerror(errno));
+      exit(1);
+    }
   }
   pthread_attr_destroy(&attr_crawler);
   printf("done\n");
-  pthread_create(&threadStats, NULL, ThreadStats, NULL);
-  if (gBlacklist.Enabled() || gServedLog.Enabled()) {
-    pthread_create(&threadBlacklist, NULL, ThreadBlacklist, NULL);
+  if (pthread_create(&threadStats, NULL, ThreadStats, NULL) != 0) {
+    fprintf(stderr, "\nCannot start stats thread: %s\n", strerror(errno));
+    exit(1);
   }
-  pthread_create(&threadDump, NULL, ThreadDumper, NULL);
+  if (gBlacklist.Enabled() || gServedLog.Enabled()) {
+    if (pthread_create(&threadBlacklist, NULL, ThreadBlacklist, NULL) != 0) {
+      fprintf(stderr, "\nCannot start blacklist thread: %s\n", strerror(errno));
+      exit(1);
+    }
+  }
+  if (pthread_create(&threadDump, NULL, ThreadDumper, NULL) != 0) {
+    fprintf(stderr, "\nCannot start dumper thread: %s\n", strerror(errno));
+    exit(1);
+  }
   void* res;
   pthread_join(threadDump, &res);
   return 0;

@@ -423,6 +423,9 @@ int dnsserver(dns_opt_t *opt) {
     if (replySocket == -1)
     {
       close(listenSocket);
+      // Back to -1, or the next thread reads a closed descriptor as "already
+      // set up" and skips straight to receiving on it.
+      listenSocket = -1;
       return -1;
     }
     int sockopt = 1;
@@ -431,8 +434,17 @@ int dnsserver(dns_opt_t *opt) {
     si_me.sin6_family = AF_INET6;
     si_me.sin6_port = htons(opt->port);
     inet_pton(AF_INET6, opt->addr, &si_me.sin6_addr);
-    if (bind(listenSocket, (struct sockaddr*)&si_me, sizeof(si_me))==-1)
+    // A failed bind used to return with listenSocket still holding a valid but
+    // unbound descriptor. Every later thread then saw it as non-negative, took
+    // the socket as already prepared, and blocked receiving on something bound
+    // to nothing -- so a port that was already in use produced four threads
+    // that looked alive, no listener, and a startup that still printed "done".
+    if (bind(listenSocket, (struct sockaddr*)&si_me, sizeof(si_me))==-1) {
+      close(listenSocket);
+      close(replySocket);
+      listenSocket = -1;
       return -2;
+    }
   }
   
   unsigned char inbuf[BUFLEN], outbuf[BUFLEN];
