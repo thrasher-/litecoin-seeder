@@ -979,6 +979,44 @@ bool CBlacklist::QueryResolverARecords(const string& name, vector<CNetAddr>& ans
 // Queries one zone about one address. Returns false when the zone did not give
 // a usable answer, in which case no verdict is recorded and the address stays
 // unchecked for that zone rather than being treated as clean.
+bool CBlacklist::InterpretAnswers(const CDnsblZone& zone, const vector<CNetAddr>& answers, bool& listedOut, string& reasonOut)
+{
+    listedOut = false;
+    reasonOut = "";
+
+    // An empty answer is NXDOMAIN, which is a definitive "not listed".
+    bool reliable = answers.empty();
+    for (vector<CNetAddr>::const_iterator answer = answers.begin(); answer != answers.end(); answer++) {
+        if (!answer->IsIPv4())
+            continue;
+        // 127.255.255.x means the query itself was rejected (bad key, queried
+        // through a public resolver, over quota); it is not a verdict.
+        if (IsSpamhausErrorAnswer(zone.zone, *answer))
+            continue;
+        // A DNSBL answers inside 127/8 and nowhere else. Anything outside it
+        // means something rewrote the response on the way back -- a wildcarding
+        // resolver, a captive portal, an ISP redirect page -- so what we are
+        // holding is not the zone's answer. Falling through to "matched no
+        // listing code, therefore clear" is how a check that fails closed
+        // quietly starts failing open and clears every address it is asked
+        // about, which is the failure the canary exists to catch and would not
+        // catch here: the canary would be rewritten the same way.
+        if (answer->GetByte(3) != 127) {
+            listedOut = false;
+            reasonOut = "";
+            return false;
+        }
+        reliable = true;
+        if (zone.IsListing(*answer)) {
+            listedOut = true;
+            if (!reasonOut.empty())
+                reasonOut += ",";
+            reasonOut += zone.label + "=" + answer->ToStringIP();
+        }
+    }
+    return reliable;
+}
+
 bool CBlacklist::CheckZone(const CNetAddr& addr, const CDnsblZone& zone, DnsblVerdict& verdict) const
 {
     verdict = DnsblVerdict();
@@ -990,26 +1028,9 @@ bool CBlacklist::CheckZone(const CNetAddr& addr, const CDnsblZone& zone, DnsblVe
     if (!LookupARecords(prefix + zone.zone, answers))
         return false;
 
-    // An empty answer is NXDOMAIN, which is a definitive "not listed".
-    bool reliable = answers.empty();
     bool listed = false;
     string reason;
-    for (vector<CNetAddr>::const_iterator answer = answers.begin(); answer != answers.end(); answer++) {
-        if (!answer->IsIPv4())
-            continue;
-        // 127.255.255.x means the query itself was rejected (bad key, queried
-        // through a public resolver, over quota); it is not a verdict.
-        if (IsSpamhausErrorAnswer(zone.zone, *answer))
-            continue;
-        reliable = true;
-        if (zone.IsListing(*answer)) {
-            listed = true;
-            if (!reason.empty())
-                reason += ",";
-            reason += zone.label + "=" + answer->ToStringIP();
-        }
-    }
-    if (!reliable)
+    if (!InterpretAnswers(zone, answers, listed, reason))
         return false;
 
     verdict.listed = listed;

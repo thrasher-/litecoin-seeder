@@ -143,6 +143,13 @@ public:
     static bool ParseEntry(const std::string& line, CBlacklistEntry& entry);
     static bool IsSpamhausZone(const std::string& zone);
     static bool IsSpamhausErrorAnswer(const std::string& zone, const CNetAddr& answer);
+
+    // Reads a zone's A answers into a verdict. Returns false when the answers
+    // are not usable, in which case the caller must record no verdict at all --
+    // leaving the address unchecked, and so unpublishable, rather than clear.
+    // Split out from the lookup so it can be tested without a resolver, because
+    // this is the function that decides whether the fail-closed property holds.
+    static bool InterpretAnswers(const CDnsblZone& zone, const std::vector<CNetAddr>& answers, bool& listedOut, std::string& reasonOut);
     static std::string RedactZone(const std::string& zone);
     static std::string FormatDnsblReason(const std::string& zone, const CNetAddr& answer);
     static std::string FormatLogEntry(int64_t timestamp, const std::string& action, const CNetAddr& addr, const std::string& reason);

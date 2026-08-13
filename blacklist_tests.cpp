@@ -11,6 +11,59 @@
 
 int main()
 {
+    // Answer interpretation is what decides whether the DNSBL check fails closed.
+    // A rewritten answer must never be read as a clearance.
+    {
+        CDnsblZone z;
+        assert(CDnsblZone::Parse("zen.example.org:2,3,4-7,9", true, z));
+        bool listed = true;
+        std::string reason = "x";
+        std::vector<CNetAddr> a;
+
+        // NXDOMAIN: definitive not-listed.
+        assert(CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(!listed && reason.empty());
+
+        // A configured listing code.
+        a.clear(); a.push_back(CNetAddr("127.0.0.2", false));
+        assert(CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(listed);
+
+        // In 127/8 but not a configured code (PBL): usable, and not a listing.
+        a.clear(); a.push_back(CNetAddr("127.0.0.10", false));
+        assert(CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(!listed);
+
+        // Outside 127/8 -- a wildcarding resolver or redirect. Not usable, and
+        // emphatically not a clearance.
+        a.clear(); a.push_back(CNetAddr("10.1.2.3", false));
+        assert(!CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(!listed);
+        a.clear(); a.push_back(CNetAddr("192.0.2.55", false));
+        assert(!CBlacklist::InterpretAnswers(z, a, listed, reason));
+
+        // A real listing mixed with a rewritten answer: distrust the whole set.
+        a.clear();
+        a.push_back(CNetAddr("127.0.0.2", false));
+        a.push_back(CNetAddr("10.1.2.3", false));
+        assert(!CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(!listed);
+
+        // Only non-IPv4 answers: nothing usable.
+        a.clear(); a.push_back(CNetAddr("2001:db8::1", false));
+        assert(!CBlacklist::InterpretAnswers(z, a, listed, reason));
+    }
+    {
+        // Spamhaus error space is not a verdict either way.
+        CDnsblZone z;
+        assert(CDnsblZone::Parse("secret.zen.dq.spamhaus.net:2,3", true, z));
+        bool listed = true; std::string reason;
+        std::vector<CNetAddr> a;
+        a.push_back(CNetAddr("127.255.255.254", false));
+        assert(!CBlacklist::InterpretAnswers(z, a, listed, reason));
+        assert(!listed);
+    }
+
     CBlacklistEntry entry;
     assert(CBlacklist::ParseEntry("192.0.2.0/24", entry));
     assert(entry.Matches(CNetAddr("192.0.2.10", false)));
